@@ -1,39 +1,43 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Chart } from 'chart.js/auto';
+import { getTemperatureData, getHumidityData, getMoistureData } from './services/api';
 import './styles.css';
-import { getSensorData } from './services/mongodb';
 
 const getFilteredData = (data, range) => {
     if (!data.length) return { labels: [], values: [] };
+
+    // Sort data by timestamp to ensure correct order
+    const sortedData = [...data].sort((a, b) => new Date(a.dateTime) - new Date(b.dateTime));
+
     if (range === 'day') {
-        const filtered = data.slice(-24);
+        // For day view, show all data points
         return {
-            labels: filtered.map(d => new Date(d.dateTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })),
-            values: filtered.map(d => d.value)
+            labels: sortedData.map(d => new Date(d.dateTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })),
+            values: sortedData.map(d => d.value)
         };
     } else if (range === 'week') {
+        // For week view, group by day and take the average
         const byDay = {};
-        data.forEach(d => {
+        sortedData.forEach(d => {
             const date = new Date(d.dateTime);
             const dayKey = date.toLocaleDateString();
             if (!byDay[dayKey]) byDay[dayKey] = [];
             byDay[dayKey].push(d);
         });
+
         const allDays = Object.keys(byDay).sort((a, b) => new Date(a) - new Date(b));
         const last7 = allDays.slice(-7);
+
         const points = last7.map(day => {
-            const noon = new Date(day + ' 12:00');
-            let closest = byDay[day][0];
-            let minDiff = Math.abs(new Date(closest.dateTime) - noon);
-            byDay[day].forEach(d => {
-                const diff = Math.abs(new Date(d.dateTime) - noon);
-                if (diff < minDiff) {
-                    closest = d;
-                    minDiff = diff;
-                }
-            });
-            return closest;
+            const dayData = byDay[day];
+            // Calculate average for the day
+            const avgValue = dayData.reduce((sum, d) => sum + d.value, 0) / dayData.length;
+            return {
+                dateTime: dayData[0].dateTime, // Use first timestamp of the day
+                value: avgValue
+            };
         });
+
         return {
             labels: points.map(d => new Date(d.dateTime).toLocaleDateString()),
             values: points.map(d => d.value)
@@ -42,7 +46,7 @@ const getFilteredData = (data, range) => {
     return { labels: [], values: [] };
 };
 
-const Graph = ({ id, label, data, color, theme, fixedRange }) => {
+const Graph = ({ id, label, data, color, theme, fixedRange, min, max }) => {
     const [range, setRange] = useState(fixedRange || 'week');
     const canvasRef = useRef(null);
     const chartRef = useRef(null);
@@ -81,6 +85,8 @@ const Graph = ({ id, label, data, color, theme, fixedRange }) => {
                 scales: {
                     y: {
                         beginAtZero: true,
+                        min: min,
+                        max: max,
                         grid: {
                             color: gridColor,
                         },
@@ -116,7 +122,7 @@ const Graph = ({ id, label, data, color, theme, fixedRange }) => {
         return () => {
             chartRef.current?.destroy();
         };
-    }, [labels, values, label, color, theme]);
+    }, [labels, values, label, color, theme, min, max]);
 
     return (
         <div className={`graph-container${fixedRange ? ' no-range-selector' : ''}`}>
@@ -143,30 +149,72 @@ const Dashboard = () => {
     const [moistureData, setMoistureData] = useState([]);
     const [temperatureData, setTemperatureData] = useState([]);
     const [humidityData, setHumidityData] = useState([]);
+    const [isLoading, setIsLoading] = useState(true);
+    const [error, setError] = useState(null);
 
     useEffect(() => {
         document.body.className = theme === 'dark' ? 'dark-mode' : 'light-mode';
     }, [theme]);
 
     useEffect(() => {
-        // Get initial data
-        setMoistureData(getSensorData('moisture'));
-        setTemperatureData(getSensorData('temperature'));
-        setHumidityData(getSensorData('humidity'));
+        const fetchData = async () => {
+            try {
+                setError(null);
+                const [tempData, humidData, moistData] = await Promise.all([
+                    getTemperatureData(),
+                    getHumidityData(),
+                    getMoistureData()
+                ]);
 
-        // Update data every 3 hours
-        const interval = setInterval(() => {
-            setMoistureData(getSensorData('moisture'));
-            setTemperatureData(getSensorData('temperature'));
-            setHumidityData(getSensorData('humidity'));
-        }, 3 * 60 * 60 * 1000);
+                setTemperatureData(tempData);
+                setHumidityData(humidData);
+                setMoistureData(moistData);
+            } catch (error) {
+                console.error('Error fetching data:', error);
+                setError('Failed to fetch data. Please try again later.');
+            } finally {
+                setIsLoading(false);
+            }
+        };
 
-        return () => clearInterval(interval);
+        fetchData();
     }, []);
 
     const toggleTheme = () => {
         setTheme(theme === 'dark' ? 'light' : 'dark');
     };
+
+    if (isLoading) {
+        return (
+            <div className="dashboard">
+                <div className="title-section">
+                    <div className="header">
+                        Zaid's Plant
+                        <button className="theme-toggle" onClick={toggleTheme} aria-label="Toggle light/dark mode">
+                            {theme === 'dark' ? '☀️' : '🌙'}
+                        </button>
+                    </div>
+                    <div className="status">Loading data...</div>
+                </div>
+            </div>
+        );
+    }
+
+    if (error) {
+        return (
+            <div className="dashboard">
+                <div className="title-section">
+                    <div className="header">
+                        Zaid's Plant
+                        <button className="theme-toggle" onClick={toggleTheme} aria-label="Toggle light/dark mode">
+                            {theme === 'dark' ? '☀️' : '🌙'}
+                        </button>
+                    </div>
+                    <div className="status" style={{ color: '#ff4444' }}>{error}</div>
+                </div>
+            </div>
+        );
+    }
 
     return (
         <div className="dashboard">
@@ -181,7 +229,7 @@ const Dashboard = () => {
             </div>
             <div className="plant-image-section">
                 <img
-                    src="https://via.placeholder.com/300x300"
+                    src="https://raw.githubusercontent.com/ZaidlKhan/plant_dashboard/refs/heads/master/camera_pics/test.jpg"
                     alt="Plant"
                     className="plant-image"
                 />
@@ -194,6 +242,8 @@ const Dashboard = () => {
                         data={moistureData}
                         color="#00ffff"
                         theme={theme}
+                        min={0}
+                        max={100}
                     />
                     <Graph
                         id="temperature"
@@ -201,6 +251,8 @@ const Dashboard = () => {
                         data={temperatureData}
                         color="#ff6b6b"
                         theme={theme}
+                        min={0}
+                        max={30}
                     />
                     <Graph
                         id="humidity"
@@ -208,6 +260,8 @@ const Dashboard = () => {
                         data={humidityData}
                         color="#2196f3"
                         theme={theme}
+                        min={0}
+                        max={100}
                     />
                 </div>
             </div>
